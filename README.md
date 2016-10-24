@@ -3,7 +3,7 @@
 ##query wrapper
 
 The query wrapper is a lightweight object-oriented Lua script used as a library to build procedural etl jobs on top of it in Lua.
-Basically it consists of uniform handling of query parameters,errro handling and logging into log tables (JOB_LOG and JOB_DETAILS) and iterating over result sets.
+Basically it consists of uniform handling of query parameters,error handling and logging into log tables (JOB_LOG and JOB_DETAILS) and iterating over result sets.
 
 The basic initial example shows how to initialize the query wrapper,
 execute a query and finish the query wrapper in the end
