@@ -1,9 +1,12 @@
-CREATE OR REPLACE LUA SCRIPT "QUERY_WRAPPER" ()
+CREATE SCHEMA ETL;
+
+
+CREATE OR REPLACE LUA SCRIPT ETL."QUERY_WRAPPER" ()
 	RETURNS ROWCOUNT
 AS
 
 	--[===[ example DDL for logging tables
-		create or replace table job_log(
+		create table if not exists ETL.job_log(
 			run_id int identity,
 			script_name varchar(100),
 			status varchar(100),
@@ -11,7 +14,7 @@ AS
 			end_time timestamp
 		);
 		
-		create or replace table job_details (
+		create table if not exists ETL.job_details (
 			detail_id int identity,
 			run_id int,
 			log_time timestamp,
@@ -37,7 +40,7 @@ AS
 			self:log( 'ERROR', info.error_message )	
 			if self.on_error == 'abort' then
 				self:finish()
-				error( info.error_message )
+				error( info.error_message .. '\n Statement was: '..info.statement_text..'\n', 2 )
 			end
 			return success, info
 		else
@@ -95,8 +98,11 @@ AS
 				if i_end > i_max then
 					i_end = i_max
 				end
-
+				
+				curr_log_level = self.verbosity
+				self.verbosity = 3
 				local success, res = prep:execute( self.messages, self.message_log_offset, i_end )
+				self.verbosity = curr_log_level
 				-- #res is the number of attempted executions, it will include the failed one. Thus, we skip that next time
 				self.message_log_offset = self.message_log_offset + #res
 				if (not success) then
@@ -230,7 +236,7 @@ AS
 			return nil
 		end
 		self.run_id = res[1][1]
-		self:log( 'INFO', 'Job nr. '..self.run_id..' registeted' )
+		self:log( 'INFO', 'Job nr. '..self.run_id..' registered' )
 	
 		--STEP 3) COMMIT to avoid transaction conflicts
 		success, res = self:commit()
