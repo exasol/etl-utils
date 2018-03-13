@@ -40,6 +40,7 @@ AS
 			self:log( 'ERROR', info.error_message )	
 			if self.on_error == 'abort' then
 				self:finish()
+				-- the second parameter is the error level, 2 is the calling function, 1 would be the query_wrapper itself
 				error( info.error_message .. '\n Statement was: '..info.statement_text..'\n', 2 )
 			end
 			return success, info
