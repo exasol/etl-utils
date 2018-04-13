@@ -1,34 +1,30 @@
 CREATE SCHEMA ETL;
 
+CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
 
-CREATE OR REPLACE LUA SCRIPT ETL."QUERY_WRAPPER" ()
-	RETURNS ROWCOUNT
-AS
-
-	--[===[ example DDL for logging tables
-		create table if not exists ETL.job_log(
-			run_id int identity,
-			script_name varchar(100),
-			status varchar(100),
-			start_time timestamp default systimestamp,
-			end_time timestamp
+    --[===[ Example DDL for logging tables
+		CREATE TABLE IF NOT EXISTS etl.job_log(
+			run_id       INT IDENTITY,
+			script_name  VARCHAR(100),
+			status       VARCHAR(100),
+			start_time   TIMESTAMP DEFAULT systimestamp,
+			end_time     TIMESTAMP
 		);
-		
-		create table if not exists ETL.job_details (
-			detail_id int identity,
-			run_id int,
-			log_time timestamp,
-			log_level varchar(10),
-			log_message varchar(2000),
-			rowcount int
+
+		CREATE TABLE IF NOT EXISTS etl.job_details (
+			detail_id    INT IDENTITY,
+			run_id       INT,
+			log_time     TIMESTAMP,
+			log_level    VARCHAR(10),
+			log_message  VARCHAR(2000),
+			rowcount     DECIMAL(18)
 		);
 	--]===]
 
-
 	function is_null( X )
-		-- result values returned by EXASolution 4.1 and above, as well as non-existing columns/variables (EXASOL-1064) within result sets
+		-- Result values returned by EXASolution 4.1 and above, as well as non-existing columns/variables (EXASOL-1064) within result sets
 		if X == null then return true end
-		-- result values returned by pre-4.1 and non-existing columns/variables pre-4.1 and post-4.2
+		-- Result values returned by pre-4.1 and non-existing columns/variables pre-4.1 and post-4.2
 		if X == nil then return true end
 		return false
 	end
@@ -37,11 +33,11 @@ AS
 		local success,info = pquery( sql_text, self.query_params )
 		if not success then
 			self:log( 'INFO', info.statement_text )
-			self:log( 'ERROR', info.error_message )	
+			self:log( 'ERROR', info.error_message )
 			if self.on_error == 'abort' then
 				self:finish()
-				-- the second parameter is the error level, 2 is the calling function, 1 would be the query_wrapper itself
-				error( info.error_message .. '\n Statement was: '..info.statement_text..'\n', 2 )
+				-- The second parameter is the error level, 2 is the calling function, 1 would be the query_wrapper itself
+				error( info.error_message .. '\n Statement was: ' .. info.statement_text .. '\n', 2 )
 			end
 			return success, info
 		else
@@ -68,7 +64,7 @@ AS
 
 	function wrap_log( self, message_type, message_text, rowcount )
 		if string.len( message_text ) > 2000 then
-			message_text = string.sub(message_text,1,1995)..'...' 
+			message_text = string.sub(message_text,1,1995) .. '...'
 		end
 
 		self.messages[1+#self.messages] = {self.run_id, os.date( '%Y-%m-%d %H:%M:%S' ), message_type, message_text, rowcount }
@@ -83,13 +79,13 @@ AS
 			self.message_log_offset = 1
 		end
 
-		--finally insert all messages in log_table
+		-- Finally insert all messages in log_table
 		if self.message_log_offset <= #self.messages then
 			self:set_param( 'TMP_LOG_TABLE', self.log_table )
-			local prep = self:prepare( [[INSERT INTO ::TMP_LOG_TABLE(RUN_ID, LOG_TIME, LOG_LEVEL, LOG_MESSAGE, ROWCOUNT)
-					VALUES (?,?,?,?,?)]] )
+			local prep = self:prepare([[INSERT INTO ::TMP_LOG_TABLE(RUN_ID, LOG_TIME, LOG_LEVEL, LOG_MESSAGE, ROWCOUNT)
+					VALUES (?,TO_TIMESTAMP(?,'YYYY-MM-DD HH24:MI:SS'),?,?,?)]])
 
-			-- limit number of executed statements to avoid "out of resultsets" error
+			-- Limit number of executed statements to avoid "out of resultsets" error
 			local vector_size = 100
 			local i_max = #self.messages
 
@@ -99,7 +95,7 @@ AS
 				if i_end > i_max then
 					i_end = i_max
 				end
-				
+
 				curr_log_level = self.verbosity
 				self.verbosity = 3
 				local success, res = prep:execute( self.messages, self.message_log_offset, i_end )
@@ -108,7 +104,7 @@ AS
 				self.message_log_offset = self.message_log_offset + #res
 				if (not success) then
 					self.log( 'WARNING', 'Failed to write detail log: ['..res[#res].error_code..'] '..res[#res].error_message )
-					-- optionally: abort here, but we will just try to get all messages written.
+					-- Optionally: abort here, but we will just try to get all messages written.
 				end
 				res = nil
 			end
@@ -121,7 +117,7 @@ AS
 		local success, info = obj:query( sql )
 		if success and obj.log_table ~= nil then
 			write_log_details( obj )
-			-- do not call wrap_commit to avoid recursion!
+			-- Do not call wrap_commit to avoid recursion!
 			obj:query( 'commit -- wrapper-log' )
 		end
 		return success, info
@@ -134,29 +130,28 @@ AS
 	function wrap_rollback( self )
 		return wrap_transaction( self, 'rollback -- wrapper' )
 	end
-	
 
 	function wrap_finish( self )
-		-- persist messages?
+		-- Persist messages?
 		if ( self.run_id ~= nil ) then
-			--Close entry in MAIN_LOG for corresponding RUN_ID
+			-- Close entry in MAIN_LOG for corresponding RUN_ID
 			main_state = 'FINISHED SUCCESSFULLY'
 			if(self.errors > 0) then
 				main_state = 'FINISHED WITH ERROR'
 			end
-		
+
 			-- TODO: should use self:query()
 			local success, res = pquery([[UPDATE ::MAIN_LOG SET END_TIME=CURRENT_TIMESTAMP, STATUS=:MAIN_STATE WHERE RUN_ID = :ID]],
-										{MAIN_LOG = self.main_log_table, ID = self.run_id, MAIN_STATE = main_state})
+							{MAIN_LOG = self.main_log_table, ID = self.run_id, MAIN_STATE = main_state})
 			if(not success) then
 				error('[querywrapper] during finish ['..res.error_code..'] '..res.error_message)
 			end
-				
-			-- commit will also write log details.
+
+			-- Commit will also write log details.
 			success, res = self:commit()
 			if(not success) then
 				error('[querywrapper] finish() while commiting ['..res.error_code..'] '..res.error_message)
-			end	
+			end
 		end -- if
 
 
@@ -165,9 +160,9 @@ AS
 			self:query( 'open schema '..self.starting_schema )
 		end
 
-		return self.messages, self.messages_types --return messages
+		return self.messages, self.messages_types -- Return messages
 	end -- wrap_finish
-	
+
 	function wrap_setParam( self, name, value )
 		self.query_params[name] = value
 	end
@@ -186,13 +181,13 @@ AS
 
 	function wrap_loadParamsFromTable( self, table_name )
 		self:set_param('PARAMETERS_TABLE', table_name)
-		suc, res = self:query( [[ select * from ::PARAMETERS_TABLE ]] )		
-	
+		suc, res = self:query( [[ select * from ::PARAMETERS_TABLE ]] )
+
 		for i = 1,#res do
 			self:set_param(res[i][1], res[i][2])
 		end
 	end
-	
+
 	function wrap_run( self, package, function_name, ... )
 		if package[function_name] ~= nil then
 			self:log( 'START', 'Entering function '..function_name )
@@ -211,8 +206,8 @@ AS
 			error( 'Undefined function '..function_name )
 		end
 	end
-	
-	--this function returns a unique id for the current execution context
+
+	-- This function returns a unique id for the current execution context
 	function get_unique_run_id(self, main_log_table, log_table, script_name)
 		if  is_null( main_log_table ) then
 			return nil
@@ -221,15 +216,16 @@ AS
 		self.main_log_table = main_log_table
 		self.log_table = log_table
 
-		--STEP 1) INSERT A NEW ROW -> GENERATES RUN_ID
-		local success, res = pquery([[INSERT INTO ::MAIN_LOG_TABLE (STATUS, SCRIPT_NAME) VALUES ('RUNNING',:SN)]],{MAIN_LOG_TABLE = main_log_table,SN = script_name})
-		
+		-- Step 1) insert a new row -> generates RUN_ID
+		local success, res = pquery([[INSERT INTO ::MAIN_LOG_TABLE (STATUS, SCRIPT_NAME) VALUES ('RUNNING',:SN)]],
+                                                {MAIN_LOG_TABLE = main_log_table,SN = script_name})
+
 		if (not success) then
 			self:log( 'WARNING', 'Failed to register job for persistent logging: ['..res.error_code..'] '..res.error_message )
 			return nil
 		end
-		
-		--STEP 2) RETRIEVE MAX ELT_RUN_ID
+
+		-- Step 2) retrieve max ELT_RUN_ID
 		local success, res = pquery([[SELECT MAX(run_id) FROM ::MAIN_LOG_TABLE]],{MAIN_LOG_TABLE = main_log_table})
 		if (not success) then
 			self:log( 'WARNING', 'Failed to retrieve job id: ['..res.error_code..'] '..res.error_message )
@@ -238,18 +234,17 @@ AS
 		end
 		self.run_id = res[1][1]
 		self:log( 'INFO', 'Job nr. '..self.run_id..' registered' )
-	
-		--STEP 3) COMMIT to avoid transaction conflicts
+
+		-- Step 3) COMMIT to avoid transaction conflicts
 		success, res = self:commit()
 		if (not success) then
 			self.run_id = nil
 			error('[querywrapper] get_unique_run_id() while commiting ['..res.error_code..'] '..res.error_message)
-		end	
+		end
 	end
 
-
 	-- Prepared_Statement::execute
-	-- returns array of query results {success, info} -- watch out for max. number of open result sets!
+	-- Returns array of query results {success, info} -- watch out for max. number of open result sets!
 	function wrap_ps_execute( self, values, start_index, end_index )
 		local res = {}
 		for row=( start_index or 1), (end_index or #values) do
@@ -267,19 +262,19 @@ AS
 	end
 
 	-- Prepared_Statement::new == Wrappper::prepare
-	-- returns class: Prepared_Statement
+	-- Returns class: Prepared_Statement
 	function wrap_prepare( self, sql_text )
 		local query_tokens = sqlparsing.tokenize( sql_text )
 		local param_count = 0
 		local startPos = 1
-	
+
 		while (startPos < #query_tokens ) do
 			local paramFound = sqlparsing.find(query_tokens, startPos, true, false, sqlparsing.iswhitespaceorcomment, '?' )
-	
+
 			if paramFound ~= nil then
 				startPos = paramFound[1]
 				param_count = param_count + 1
-				query_tokens[startPos] = ':PS_VAL_'..param_count
+				query_tokens[startPos] = ':PS_VAL_' .. param_count
 			else
 				break
 			end
@@ -288,27 +283,19 @@ AS
 		if param_count > 0 then
 			sql_text = table.concat( query_tokens, '' )
 		end
-	
+
 		return {
-			-- member variables
+			-- Member variables
 			ps_wrapper = self,
 			ps_sql_text = sql_text,
 			ps_param_count = param_count,
-			
-			-- class functions
+
+			-- Class functions
 			execute = wrap_ps_execute
 		}
 	end
 
-
-
-	--
-	--
-	--
-	--[[ iterator functionality for result sets ]]--
-	--
-	--
-	--
+	--[[ Iterator functionality for result sets ]]--
 
 	--[[
 		checks if the argument is a string or a resultset. In the first case, it will execute the given query.
@@ -322,7 +309,7 @@ AS
 			return true, sql_or_result
 		end
 	end
-	
+
 	--[[
 		Takes a result set or sql text and returns an iterator for the ROWS of the result.
 		Result fields can be adressed by name or by index (startig at column 1)
@@ -381,12 +368,11 @@ AS
 		end
 	end
 
-
 	function new( main_log_table, log_table, script_name)
 		local tmp_obj = {
 			-- member variables
 			messages = {},
-			messages_types = "run_id int, msg_time timestamp, msg_type varchar(10), message varchar(2000), rowcount decimal(9)",
+			messages_types = "run_id INT, msg_time VARCHAR2(20), msg_type VARCHAR(10), message VARCHAR(2000), rowcount DECIMAL(18)",
 			query_params = {},
 			verbosity = 2,
 			on_error = 'abort',
