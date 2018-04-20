@@ -4,16 +4,16 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
 
     --[===[ Example DDL for logging tables
         CREATE TABLE IF NOT EXISTS etl.job_log(
-            run_id       INT IDENTITY
-          , script_name  VARCHAR(100)
+            run_id       INT IDENTITY NOT NULL PRIMARY KEY
+          , script_name  VARCHAR(100) NOT NULL
           , status       VARCHAR(100)
           , start_time   TIMESTAMP DEFAULT SYSTIMESTAMP
           , end_time     TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS etl.job_details (
-            detail_id    INT IDENTITY
-          , run_id       INT
+            detail_id    INT IDENTITY NOT NULL
+          , run_id       INT NOT NULL REFERENCES etl.job_log ( run_id )
           , log_time     TIMESTAMP
           , log_level    VARCHAR(10)
           , log_message  VARCHAR(20000)
@@ -21,12 +21,18 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
         );
     --]===]
 
-    function is_null( X )
+    local function is_null( X )
         -- Result values returned by EXASolution 4.1 and above, as well as non-existing columns/variables (EXASOL-1064) within result sets
         if X == null then return true end
         -- Result values returned by pre-4.1 and non-existing columns/variables pre-4.1 and post-4.2
         if X == nil then return true end
         return false
+    end
+
+    local function trim(str, chs)
+        if not str then return nil end
+        chs = chs or "%s"
+        return string.match(str, "[^" .. chs .. "]+.+[^" .. chs .. "]+")
     end
 
     function wrap_query( self, sql_text )
@@ -63,7 +69,7 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
     end
 
     function wrap_log( self, message_type, message_text, rowcount )
-        message_text = message_text or ''
+        message_text = trim(message_text) or ''
 
         if string.len( message_text ) > 20000 then
             message_text = string.sub( message_text, 1, 19995 ) .. '...'
@@ -87,7 +93,8 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
             local prep = self:prepare( [[
                 INSERT INTO ::TMP_LOG_TABLE( RUN_ID, LOG_TIME, LOG_LEVEL, LOG_MESSAGE, ROWCOUNT )
                 VALUES ( ?, TO_TIMESTAMP( ?, 'YYYY-MM-DD HH24:MI:SS' ), ?, ?, ? )
-            ]] )
+                ]]
+            )
 
             -- Limit number of executed statements to avoid "out of resultsets" error
             local vector_size = 100
@@ -145,8 +152,14 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
             end
 
             -- TODO: should use self:query()
-            local success, res = pquery( [[UPDATE ::MAIN_LOG SET END_TIME=CURRENT_TIMESTAMP, STATUS=:MAIN_STATE WHERE RUN_ID = :ID]],
-                                         {MAIN_LOG = self.main_log_table, ID = self.run_id, MAIN_STATE = main_state} )
+            local success, res = pquery( [[
+                UPDATE ::MAIN_LOG_TABLE 
+                SET    end_time = CURRENT_TIMESTAMP
+                     , status   = :MAIN_STATE
+                WHERE  run_id = :ID
+                ]],
+                { MAIN_LOG_TABLE = self.main_log_table, ID = self.run_id, MAIN_STATE = main_state }
+            )
             if not success then
                 error( '[querywrapper] during finish [' .. res.error_code .. '] ' .. res.error_message )
             end
@@ -221,8 +234,12 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
         self.log_table = log_table
 
         -- Step 1) insert a new row -> generates RUN_ID
-        local success, res = pquery( [[INSERT INTO ::MAIN_LOG_TABLE ( STATUS, SCRIPT_NAME ) VALUES ( 'RUNNING', :SN )]],
-                                                {MAIN_LOG_TABLE = main_log_table,SN = script_name} )
+        local success, res = pquery( [[
+            INSERT INTO ::MAIN_LOG_TABLE ( status, script_name )
+            VALUES ( 'RUNNING', :SN )
+            ]],
+            { MAIN_LOG_TABLE = main_log_table, SN = script_name }
+        )
 
         if not success then
             self:log( 'WARNING', 'Failed to register job for persistent logging: [' .. res.error_code .. '] ' .. res.error_message )
@@ -302,7 +319,7 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
     --[[ Iterator functionality for result sets ]]--
 
     --[[
-        checks if the argument is a string or a resultset. In the first case, it will execute the given query.
+        Checks if the argument is a string or a resultset. In the first case, it will execute the given query.
         @returns: given query result or result of executed sql text
     --]]
     local function query_or_result( self, sql_or_result )
