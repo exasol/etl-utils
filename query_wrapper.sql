@@ -1,5 +1,6 @@
 CREATE SCHEMA ETL;
 
+--/
 CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
 
     --[===[ Example DDL for logging tables
