@@ -5,7 +5,7 @@
 ## Query Wapper
 
 The Query Wrapper is a lightweight object-oriented Lua script used as a library to build procedural ETL jobs in Lua.
-It priovides uniform handling of query parameters, errors and logging into log tables (`job_log` and `job_details`) and iterating over result sets.
+It provides uniform handling of query parameters, errors and logging into log tables (`job_log` and `job_details`) and iterating over result sets.
 
 ### Installation
 
