@@ -1,26 +1,25 @@
-CREATE SCHEMA ETL;
+CREATE SCHEMA IF NOT EXISTS ETL;
+
+/** Example DDL for logging tables **/
+CREATE TABLE IF NOT EXISTS etl.job_log(
+    run_id       INT IDENTITY NOT NULL PRIMARY KEY
+  , script_name  VARCHAR(100) NOT NULL
+  , status       VARCHAR(100)
+  , start_time   TIMESTAMP DEFAULT SYSTIMESTAMP
+  , end_time     TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS etl.job_details (
+    detail_id    INT IDENTITY NOT NULL
+  , run_id       INT NOT NULL REFERENCES etl.job_log ( run_id )
+  , log_time     TIMESTAMP
+  , log_level    VARCHAR(10)
+  , log_message  VARCHAR(20000)
+  , rowcount     DECIMAL(18)
+);
 
 --/
 CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
-
-    --[===[ Example DDL for logging tables
-        CREATE TABLE IF NOT EXISTS etl.job_log(
-            run_id       INT IDENTITY NOT NULL PRIMARY KEY
-          , script_name  VARCHAR(100) NOT NULL
-          , status       VARCHAR(100)
-          , start_time   TIMESTAMP DEFAULT SYSTIMESTAMP
-          , end_time     TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS etl.job_details (
-            detail_id    INT IDENTITY NOT NULL
-          , run_id       INT NOT NULL REFERENCES etl.job_log ( run_id )
-          , log_time     TIMESTAMP
-          , log_level    VARCHAR(10)
-          , log_message  VARCHAR(20000)
-          , rowcount     DECIMAL(18)
-        );
-    --]===]
 
     local function is_null( X )
         -- Result values returned by EXASolution 4.1 and above, as well as non-existing columns/variables (EXASOL-1064) within result sets
@@ -36,13 +35,14 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
         return string.match(str, "[^" .. chs .. "]+.+[^" .. chs .. "]+")
     end
 
-    function wrap_query( self, sql_text )
-        local success,info = pquery( sql_text, self.query_params )
+    function wrap_query( self, sql_text, options )
+        options = options or {logging=true}
+        local success,info = pquery( sql_text, options.params or self.query_params )
         if not success then
             self:log( 'INFO', info.statement_text )
             self:log( 'ERROR', info.error_message )
-            if self.on_error == 'abort' then
-                self:finish()
+            if self.on_error == 'abort' or self.on_error == 'rollback' then
+                self:finish({rollback=(self.on_error=='rollback')})
                 -- The second parameter is the error level, 2 is the calling function, 1 would be the query_wrapper itself
                 error( info.error_message .. '\n Statement was: ' .. info.statement_text .. '\n', 2 )
             end
@@ -58,12 +58,10 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
                 end
             end
 
-            if self.verbosity >= 3 then
+            if self.verbosity >= 3 and options.logging then
                 self:log( 'DEBUG', info.statement_text, rows )
-            else
-                if self.verbosity == 2 then
-                    self:log( 'INFO', info.statement_text, rows )
-                end
+            elseif self.verbosity == 2 and options.logging then
+                self:log( 'INFO', info.statement_text, rows )
             end
         end
         return success, info
@@ -71,6 +69,10 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
 
     function wrap_log( self, message_type, message_text, rowcount )
         message_text = trim(message_text) or ''
+        
+        if string.len( message_type ) > 10 then
+            message_type = string.sub( message_type, 1, 7 ) .. '...'
+        end
 
         if string.len( message_text ) > 20000 then
             message_text = string.sub( message_text, 1, 19995 ) .. '...'
@@ -108,10 +110,8 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
                     i_end = i_max
                 end
 
-                curr_log_level = self.verbosity
-                self.verbosity = 3
-                local success, res = prep:execute( self.messages, self.message_log_offset, i_end )
-                self.verbosity = curr_log_level
+                local success, res = prep:execute( self.messages, self.message_log_offset, i_end, {logging=false} )
+
                 -- #res is the number of attempted executions, it will include the failed one. Thus, we skip that next time
                 self.message_log_offset = self.message_log_offset + #res
                 if not success then
@@ -125,25 +125,38 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
     end
 
     local
-    function wrap_transaction( obj, sql )
-        local success, info = obj:query( sql )
+    function wrap_transaction( obj, sql, options )
+        local success, info = obj:query( sql, options )
         if success and obj.log_table ~= nil then
             write_log_details( obj )
             -- Do not call wrap_commit to avoid recursion!
-            obj:query( 'commit -- wrapper-log' )
+            obj:query( 'commit -- wrapper-log', {logging=false} )
         end
         return success, info
     end
 
-    function wrap_commit( self )
-        return wrap_transaction( self, 'commit -- wrapper' )
+    function wrap_commit( self, options )
+        return wrap_transaction( self, 'commit -- wrapper', options )
     end
 
-    function wrap_rollback( self )
-        return wrap_transaction( self, 'rollback -- wrapper' )
+    function wrap_rollback( self, options )
+        return wrap_transaction( self, 'rollback -- wrapper', options )
     end
 
-    function wrap_finish( self )
+    function wrap_finish( self, options )
+        options = options or {}
+        
+        -- Commit / rollback will also write log details.
+        if options.rollback then
+          success, res = self:rollback()
+        else
+          success, res = self:commit()
+        end
+        
+        if not success  then
+            error( '[querywrapper] finish() while commiting / rollbacking [' .. res.error_code .. '] ' .. res.error_message )
+        end
+        
         -- Persist messages?
         if ( self.run_id ~= nil ) then
             -- Close entry in MAIN_LOG for corresponding RUN_ID
@@ -152,21 +165,19 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
                 main_state = 'FINISHED WITH ERROR'
             end
 
-            -- TODO: should use self:query()
-            local success, res = pquery( [[
+            local success, res = self:query( [[
                 UPDATE ::MAIN_LOG_TABLE 
                 SET    end_time = CURRENT_TIMESTAMP
                      , status   = :MAIN_STATE
                 WHERE  run_id = :ID
                 ]],
-                { MAIN_LOG_TABLE = self.main_log_table, ID = self.run_id, MAIN_STATE = main_state }
+                {logging=false, params={ MAIN_LOG_TABLE = self.main_log_table, ID = self.run_id, MAIN_STATE = main_state }}
             )
             if not success then
                 error( '[querywrapper] during finish [' .. res.error_code .. '] ' .. res.error_message )
             end
-
-            -- Commit will also write log details.
-            success, res = self:commit()
+            
+            success, res = self:commit({logging=false})
             if not success  then
                 error( '[querywrapper] finish() while commiting [' .. res.error_code .. '] ' .. res.error_message )
             end
@@ -175,7 +186,7 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
 
         if not is_null( self.starting_schema ) then
             -- rollback any schema movements
-            self:query( 'OPEN SCHEMA ' .. self.starting_schema )
+            self:query( 'OPEN SCHEMA ' .. self.starting_schema, {logging=false} )
         end
 
         return self.messages, self.messages_types -- Return messages
@@ -201,9 +212,15 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
         self:set_param( 'PARAMETERS_TABLE', table_name )
         suc, res = self:query( [[SELECT * FROM ::PARAMETERS_TABLE]] )
 
+        local str = "{ "
         for i = 1,#res do
             self:set_param( res[i][1], res[i][2] )
+            if #str > 2 then str = str..', ' end
+            str = str..'"'..res[i][1]..'" = "'..res[i][2]..'"'
         end
+        str = str.." }"
+        -- write state of parameter table in log
+        self:log("INFO", "Loaded Parameters from Table "..table_name..": "..str)
     end
 
     function wrap_run( self, package, function_name, ... )
@@ -258,7 +275,7 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
         self:log( 'INFO', 'Job nr. ' .. self.run_id .. ' registered' )
 
         -- Step 3) COMMIT to avoid transaction conflicts
-        success, res = self:commit()
+        success, res = self:commit({logging=false})
         if not success then
             self.run_id = nil
             error( '[querywrapper] get_unique_run_id() while commiting [' .. res.error_code .. '] ' .. res.error_message )
@@ -267,13 +284,13 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
 
     -- Prepared_Statement::execute
     -- Returns array of query results {success, info} -- watch out for max. number of open result sets!
-    function wrap_ps_execute( self, values, start_index, end_index )
+    function wrap_ps_execute( self, values, start_index, end_index, options )
         local res = {}
         for row=( start_index or 1 ),  (end_index or #values ) do
             for p=1,self.ps_param_count do
                 self.ps_wrapper:set_param( 'PS_VAL_' .. p, ( values[row][p] or null ) )
             end
-            local a, b = self.ps_wrapper:query( self.ps_sql_text )
+            local a, b = self.ps_wrapper:query( self.ps_sql_text, options )
             res[1+#res] = b
             if not a then
                 -- early abort
@@ -397,7 +414,7 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
             messages_types = "run_id INT, msg_time VARCHAR2(20), msg_type VARCHAR(10), message VARCHAR(20000), rowcount DECIMAL(18)",
             query_params = {},
             verbosity = 2,
-            on_error = 'abort',
+            on_error = 'abort', -- abort (no rollback) | rollback | continue
             errors = 0,
 
             -- helper function
@@ -432,7 +449,7 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
             tmp_obj:register( main_log_table, log_table, script_name )
         end
         -- determine current schema
-        local success, info = tmp_obj:query( 'SELECT CURRENT_SCHEMA' )
+        local success, info = tmp_obj:query( 'SELECT CURRENT_SCHEMA', {logging=false} )
         if success then
             tmp_obj.starting_schema = info[1][1]
         end
