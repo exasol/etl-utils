@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS etl.job_log(
     run_id       INT IDENTITY NOT NULL PRIMARY KEY
   , script_name  VARCHAR(100) NOT NULL
   , status       VARCHAR(100)
-  , start_time   TIMESTAMP DEFAULT SYSTIMESTAMP
+  , start_time   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   , end_time     TIMESTAMP
 );
 
