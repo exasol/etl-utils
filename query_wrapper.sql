@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS etl.job_details (
   , run_id       INT NOT NULL REFERENCES etl.job_log ( run_id )
   , log_time     TIMESTAMP
   , log_level    VARCHAR(10)
-  , log_message  VARCHAR(20000)
+  , log_message  VARCHAR(2000000)
   , rowcount     DECIMAL(18)
 );
 
