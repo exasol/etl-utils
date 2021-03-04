@@ -2,7 +2,7 @@
 
 ###### Please note that this is an open source project which is *not officially supported* by EXASOL. We will try to help you as much as possible, but can't guarantee anything since this is not an official EXASOL product.
 
-## Query Wapper
+## Query Wrapper
 
 The Query Wrapper is a lightweight object-oriented Lua script used as a library to build procedural ETL jobs in Lua.
 It provides uniform handling of query parameters, errors and logging into log tables (`job_log` and `job_details`) and iterating over result sets.
