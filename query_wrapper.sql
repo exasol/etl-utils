@@ -260,8 +260,8 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
         )
 
         if not success then
-            self:log( 'WARNING', 'Failed to register job for persistent logging: [' .. res.error_code .. '] ' .. res.error_message )
-            return nil
+            -- self:log( 'WARNING', 'Failed to register job for persistent logging: [' .. res.error_code .. '] ' .. res.error_message )
+            error('[querywrapper] get_unique_run_id() failed to register job for persistent logging [' .. res.error_code .. '] ' .. res.error_message )
         end
 
         -- Step 2) retrieve max ELT_RUN_ID
