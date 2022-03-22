@@ -163,6 +163,7 @@ CREATE OR REPLACE LUA SCRIPT etl.query_wrapper () RETURNS ROWCOUNT AS
             main_state = 'FINISHED SUCCESSFULLY'
             if self.errors > 0 then
                 main_state = 'FINISHED WITH ERROR'
+                self:rollback()
             end
 
             local success, res = self:query( [[
